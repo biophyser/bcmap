@@ -55,7 +55,9 @@ GENCODE = { 'ATA':'I', 'ATC':'I', 'ATT':'I', 'ATG':'M',
             'TTC':'F', 'TTT':'F', 'TTA':'L', 'TTG':'L',
             'TAC':'Y', 'TAT':'Y', 'TAA':'*', 'TAG':'*',
             'TGC':'C', 'TGT':'C', 'TGA':'*', 'TGG':'W',
-            '---':'-'}
+            '---':'-',
+            'TCN':'S', 'CTN':'L', 'CCN':'P', 'CGN':'R',
+            'ACN':'T', 'GTN':'V', 'CGN':'A', 'GGN':'G'}
 
 # Dictionary mapping ascii value to Q-score
 Q_DICT = {}

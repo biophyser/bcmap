@@ -1,385 +1,26 @@
+
+from . import data
+
 import numpy as np
-import copy, itertools, os
-
-BASE_DICT = {"A":[1.00,0.00,0.00,0.00],
-             "C":[0.00,1.00,0.00,0.00],
-             "G":[0.00,0.00,1.00,0.00],
-             "T":[0.00,0.00,0.00,1.00],
-             "U":[0.00,0.00,0.00,1.00],
-             "W":[0.50,0.00,0.00,0.50],
-             "S":[0.00,0.50,0.50,0.00],
-             "M":[0.50,0.50,0.00,0.00],
-             "K":[0.00,0.00,0.50,0.50],
-             "R":[0.50,0.00,0.50,0.00],
-             "Y":[0.00,0.50,0.00,0.50],
-             "B":[0.00,0.33,0.33,0.33],
-             "D":[0.33,0.00,0.33,0.33],
-             "H":[0.33,0.33,0.00,0.33],
-             "V":[0.33,0.33,0.33,0.00],
-             "N":[0.25,0.25,0.25,0.25],
-             "-":[0.00,0.00,0.00,0.00]}
-
-# Convert BASE_DICT values to numpy arrays, forcing normalization
-# to 1.0.
-for k in BASE_DICT.keys():
-    value = np.array(BASE_DICT[k])
-    if np.sum(value) != 0:
-        value = value/np.sum(value)
-    BASE_DICT[k] = value
-
-INDEX_TO_BASE = list("ACGT-")
-BASE_TO_INDEX = dict([(k,i) for i, k in enumerate(INDEX_TO_BASE)])
-BASE_TO_INDEX["N"] = -1
-BASE_FREQS = BASE_DICT["N"]
-LN_BASE_FREQS = np.log(BASE_DICT["N"])
-
-# genetic code
-GENCODE = { 'ATA':'I', 'ATC':'I', 'ATT':'I', 'ATG':'M',
-            'ACA':'T', 'ACC':'T', 'ACG':'T', 'ACT':'T',
-            'AAC':'N', 'AAT':'N', 'AAA':'K', 'AAG':'K',
-            'AGC':'S', 'AGT':'S', 'AGA':'R', 'AGG':'R',
-            'CTA':'L', 'CTC':'L', 'CTG':'L', 'CTT':'L',
-            'CCA':'P', 'CCC':'P', 'CCG':'P', 'CCT':'P',
-            'CAC':'H', 'CAT':'H', 'CAA':'Q', 'CAG':'Q',
-            'CGA':'R', 'CGC':'R', 'CGG':'R', 'CGT':'R',
-            'GTA':'V', 'GTC':'V', 'GTG':'V', 'GTT':'V',
-            'GCA':'A', 'GCC':'A', 'GCG':'A', 'GCT':'A',
-            'GAC':'D', 'GAT':'D', 'GAA':'E', 'GAG':'E',
-            'GGA':'G', 'GGC':'G', 'GGG':'G', 'GGT':'G',
-            'TCA':'S', 'TCC':'S', 'TCG':'S', 'TCT':'S',
-            'TTC':'F', 'TTT':'F', 'TTA':'L', 'TTG':'L',
-            'TAC':'Y', 'TAT':'Y', 'TAA':'*', 'TAG':'*',
-            'TGC':'C', 'TGT':'C', 'TGA':'*', 'TGG':'W',
-            '---':'-'}
-
-# Dictionary mapping ascii value to Q-score
-Q_DICT = {}
-for i in range(33,76):
-    Q_DICT[chr(i)] = 10**(-(i-33)/10)
-
-def translate(sequence):
-    """
-    Translate a nucleotide sequence into a protein sequence.  If there is a
-    problem, write an "X" into the sequence.
-    """
-
-    try:
-        return "".join([GENCODE[sequence[3*i:3*i+3]]
-                        for i in range(len(sequence)//3)])
-    except KeyError:
-        out = []
-        for i in range(len(sequence)//3):
-            try:
-                out.append(GENCODE[sequence[3*i:3*i+3]])
-            except KeyError:
-                out.append("X")
-        return "".join(out)
-
-class Experiment:
-    """
-    """
-
-    def __init__(self,ref_file,cluster_file,key_size=25):
-
-        self._ref_file = ref_file
-        self._cluster_file = cluster_file
-        self._key_size = key_size
-
-        self._ref = SequenceProfile(self._ref_file)
-        self._load_clusters()
-
-    def _load_clusters(self):
-        """
-        Load a file containing barcodes placed into clusters.
-
-        Returns:
-            a dictionary with barcodes as keys and cluster indexes as values.
-            a dictionary with clusters as keys and lists of barcodes as values.
-        """
-
-        cluster_counter = -1
-        cluster_dict = {}
-        inverse_dict = {}
-        with open(self._cluster_file) as f:
-            for l in f:
-                col = l.split()
-                cluster = int(col[0])
-                if cluster == -1:
-                    cluster = cluster_counter
-                    cluster_counter = cluster_counter - 1
-                cluster_dict[col[1].strip()[:self._key_size]] = cluster
-
-                try:
-                    inverse_dict[cluster].append(col[1].strip()[:self._key_size])
-                except KeyError:
-                    inverse_dict[cluster] = [col[1].strip()[:self._key_size]]
-
-        self._cluster_dict = cluster_dict
-        self._inverse_dict = inverse_dict
-
-    def _load_reads(self,read_file):
-        """
-        Create a dictionary where the keys are clusters in cluster_dict
-        and the values are tuples of sequence/phred scores taken from
-        read_file.
-        """
-
-        key_size = len(list(self._cluster_dict.keys())[0])
-
-        out_dict = {}
-        with open(read_file) as f:
-            for l in f:
-                col = l.split("|")
-
-                bc = col[0][:key_size].strip()
-                bases = col[2].strip()
-                quals = np.array([Q_DICT[k] for k in list(col[3].strip())])
-
-                cluster = self._cluster_dict[bc]
-
-                try:
-                    out_dict[cluster].append((bases,quals))
-                except KeyError:
-                    out_dict[cluster] = [(bases,quals)]
-
-        return out_dict
-
-    def _call_consensus(self,n_probs,c_probs,cutoff=0.5):
-
-        diag_mask = np.eye(4,dtype=np.bool)
-
-        num_mismatch = 0
-        consensus = []
-        support = []
-        for i in range(n_probs.shape[0]):
-
-            n_data = n_probs[i,:]
-            c_data = c_probs[i,:]
-
-            # Signal from N channel
-            if np.sum(n_data) > 0:
-
-                # Signal from C channel, average signals
-                if np.sum(c_data) > cutoff:
-                    average_prob = (n_data + c_data)/2
-
-                # No signal from C channel, just take N channel
-                else:
-                    average_prob = n_data
-
-            # No signal from N channel
-            else:
-
-                # Signal from C channel, use that one
-                if np.sum(c_data) > 0:
-                    average_prob = c_data
-
-                # No signal from either channel
-                else:
-                    average_prob = np.zeros(n_data.shape,dtype=np.float)
-
-            above_cutoff_mask = average_prob >= cutoff
-
-            # High-probability for one base
-            if np.sum(above_cutoff_mask) == 1:
-                base = np.argmax(average_prob)
-                consensus.append(INDEX_TO_BASE[base])
-                support.append(average_prob[base])
-
-            # No good data
-            elif np.sum(above_cutoff_mask) == 0:
-                consensus.append("N")
-                support.append(np.max(average_prob))
-
-            # Conflicting data
-            else:
-                consensus.append("X")
-                support.append(np.max(average_prob))
-                num_mismatch += 1
-
-        return consensus, support, num_mismatch
-
-    def map_from_cluster_files(self,cluster_directory,key_size=25):
-
-        cluster_files = os.listdir(cluster_directory)
-        out_root = cluster_directory
-
-        # Make output file names
-        cluster_out_file = "{}.clusters".format(out_root)
-        consensus_out_file = "{}_dna.fasta".format(out_root)
-        prot_out_file = "{}_prot.fasta".format(out_root)
-
-        # Make sure output files do not exist
-        if os.path.isfile(cluster_out_file) or \
-           os.path.isfile(consensus_out_file) or \
-           os.path.isfile(prot_out_file):
-           err = "output file(s) exist\n"
-           raise FileExistsError(err)
-
-        # Open output file pipes
-        cluster_out = open(cluster_out_file,"w")
-        consensus_out = open(consensus_out_file,"w")
-        prot_out = open(prot_out_file,"w")
-
-        for i, cf in enumerate(cluster_files):
-
-            n_term_reads = []
-            c_term_reads = []
-            with open(os.path.join(cluster_directory,cf)) as f:
-                for l in f:
-                    col = l.split("|")
-
-                    bc = col[0][:key_size].strip()
-                    bases = col[2].strip()
-                    quals = np.array([Q_DICT[k] for k in list(col[3].strip())])
-
-                    if bases[-6:] == "TAATAA":
-                        c_term_reads.append((bases,quals))
-                    else:
-                        n_term_reads.append((bases,quals))
-
-                    # Write cluster/barcode pairs to a file
-                    cluster_out.write("{}:{}\n".format(bc,cf.split("_")[0]))
-
-            # Make sure that both N- and C-terminal sequences are seen
-            if len(n_term_reads) == 0 or len(c_term_reads) == 0:
-                continue
-
-            # cluster number
-            c = cf.split("_")[1].split(".")[0]
-
-            # Get N- and C-terminal sequences for this cluster
-            n_term_probs = self._ref.calc_base_prob(n_term_reads,align_three_prime=False)
-            c_term_probs = self._ref.calc_base_prob(c_term_reads,align_three_prime=True)
-
-            # Get the consensus sequence defined by these
-            consensus, support, num_mismatch = self._call_consensus(n_term_probs,
-                                                                    c_term_probs)
-
-            #Create human-readable support
-            to_write = []
-            for s in support:
-                v = "{:.1f}".format(np.round(s))
-                if v == "1.0": v = "0.9"
-
-                to_write.append(v[-1])
-            to_write = "".join(to_write)
-
-            consensus = "".join(consensus)
-            consensus_out.write(">cluster_{},{}\n{}\n{}\n".format(c,
-                                                                  num_mismatch,
-                                                                  consensus,
-                                                                  to_write))
-
-            protein = translate(consensus)
-            prot_out.write(">cluster_{},{}\n{}\n".format(c,num_mismatch,protein))
-
-
-            # Flush output files
-            if i % 1000 == 0:
-                cluster_out.flush()
-                consensus_out.flush()
-                prot_out.flush()
-                print(i,"of",len(clusters_seen))
-                break
-
-        # Close output files
-        cluster_out.close()
-        consensus_out.close()
-        prot_out.close()
-
-
-
-
-    def create_map(self,n_term_file,c_term_file,out_root):
-
-        # Make output file names
-        cluster_out_file = "{}.clusters".format(out_root)
-        consensus_out_file = "{}_dna.fasta".format(out_root)
-        prot_out_file = "{}_prot.fasta".format(out_root)
-
-        # Make sure output files do not exist
-        if os.path.isfile(cluster_out_file) or \
-           os.path.isfile(consensus_out_file) or \
-           os.path.isfile(prot_out_file):
-           err = "output file(s) exist\n"
-           raise FileExistsError(err)
-
-        # Load in sequences, mapping them to unique cluster numbers
-        n_term_reads = self._load_reads(n_term_file)
-        c_term_reads = self._load_reads(c_term_file)
-
-        # Create list of all clusters seen
-        clusters_seen = list(n_term_reads.keys())
-        clusters_seen.extend(c_term_reads.keys())
-        clusters_seen = list(set(clusters_seen))
-        clusters_seen.sort()
-
-        # Open output file pipes
-        cluster_out = open(cluster_out_file,"w")
-        consensus_out = open(consensus_out_file,"w")
-        prot_out = open(prot_out_file,"w")
-
-        # Go through every cluster
-        for i, c in enumerate(clusters_seen):
-
-            # Make sure that N- and C-termini have both been seen in this
-            # cluster
-            try:
-                n_term_reads[c]
-                c_term_reads[c]
-            except KeyError:
-                continue
-
-            # Get N- and C-terminal sequences for this cluster
-            n_term_probs = self._ref.calc_base_prob(n_term_reads[c],align_three_prime=False)
-            c_term_probs = self._ref.calc_base_prob(c_term_reads[c],align_three_prime=True)
-
-            # Get the consensus sequence defined by these
-            consensus, support, num_mismatch = self._call_consensus(n_term_probs,
-                                                                    c_term_probs)
-
-            #Create human-readable support
-            to_write = []
-            for s in support:
-                v = "{:.1f}".format(np.round(s))
-                if v == "1.0": v = "0.9"
-
-                to_write.append(v[-1])
-            to_write = "".join(to_write)
-
-            consensus = "".join(consensus)
-            consensus_out.write(">cluster_{},{}\n{}\n{}\n".format(c,
-                                                                  num_mismatch,
-                                                                  consensus,
-                                                                  to_write))
-
-            protein = translate(consensus)
-            prot_out.write(">cluster_{},{}\n{}\n".format(c,num_mismatch,protein))
-
-            # Write cluster/barcode pairs to a file
-            for bc in self._inverse_dict[c]:
-                cluster_out.write("{}:{}\n".format(bc,c))
-
-            # Flush output files
-            if i % 1000 == 0:
-                cluster_out.flush()
-                consensus_out.flush()
-                prot_out.flush()
-                print(i,"of",len(clusters_seen))
-
-        # Close output files
-        cluster_out.close()
-        consensus_out.close()
-        prot_out.close()
-
+import itertools
 
 class SequenceProfile:
 
-    def __init__(self,sequence_file=None):
+    def __init__(self,ref_file,merge_gaps=True,max_gap_merge=3):
+        """
+        ref_file: file describing the expected characteristics of the library
+                  First line should be a sequence.
+                  Second line should be sequence with all possible mutations.
+        merge_gaps: boolean.  whether or not to merge sequential gaps when
+                    making all possible gap combinations (default to True)
+        max_gap_merge: maximum number of sequential gaps to merge.  defaults to
+                       3, assuming gaps are codons.
+        """"
 
-        if sequence_file is not None:
-            self.read_sequence_file(sequence_file)
+        self._ref_file = ref_file
+        self._merge_gaps = merge_gaps
+        self._max_gap_merge = max_gap_merge
+        self._read_ref_file()
 
     def _seq_to_prob(self,input_array):
         """
@@ -396,7 +37,7 @@ class SequenceProfile:
 
         out = np.zeros((len(input_array),4),dtype=np.float)
         for i in range(len(input_array)):
-            out[i,:] = BASE_DICT[input_array[i]]
+            out[i,:] = data.BASE_DICT[input_array[i]]
 
         return out
 
@@ -420,17 +61,12 @@ class SequenceProfile:
 
         return np.sum((array1 - array2)**2)/array1.shape[0]
 
-    def read_sequence_file(self,sequence_file,merge_gaps=True,max_gap_merge=3):
+    def _read_ref_file(self):
         """
-        First line should be a sequence.
-        Second line should be sequence with all possible mutations.
-        merge_gaps: boolean.  whether or not to merge sequential gaps when
-                    making all possible gap combinations (default to True)
-        max_gap_merge: maximum number of sequential gaps to merge.  defaults to
-                       3, assuming gaps are codons.
+        Read a reference input file.
         """
 
-        f = open(sequence_file,"r")
+        f = open(self._ref_file,"r")
         lines = [l.strip() for l in f.readlines()
                  if not l.startswith("#") and len(l.strip()) != 0]
         f.close()
@@ -452,7 +88,35 @@ class SequenceProfile:
         mut = lines[1]
 
         self._total_length = len(wt)
-        self._b
+
+        # ------------------------------------------------------------------- #
+        # Calcualate frequencies of bases seen in alignmnet
+        # ------------------------------------------------------------------- #
+
+        all_sequence_data = list(wt)
+        all_sequence_data.extend(list(mut))
+        num_gaps = sum([1 for i s in all_sequence_data if s == "-"])
+        non_gaps = sum([1 for i s in all_sequence_data if s != "-"])
+        total = num_gaps + non_gaps
+
+        freq = np.zeros(4,dtype=np.float)
+        for s in all_sequence_data:
+            if s == "-":
+                continue
+            else:
+                freq[:] += data.BASE_DICT[s]
+
+        self._base_freq_no_gap = freq/non_gaps
+
+        freq_with_gap = np.zeros(5,dtype=np.float)
+        freq_with_gap[:4] = self._base_freq_no_gap*(non_gaps/total)
+        freq_with_gap[4] = num_gaps/total
+
+        self._base_freq_with_gap = freq_with_gap
+
+        # ------------------------------------------------------------------- #
+        # Parse gaps in the alignment
+        # ------------------------------------------------------------------- #
 
         # Walk though sequence, recording non-gap sequence (real_wt, real_mut)
         # and position of each gap (gaps)
@@ -479,7 +143,7 @@ class SequenceProfile:
                 assigned = False
 
                 # Should we try to merge gaps?
-                if merge_gaps:
+                if self._merge_gaps:
 
                     # Is there a previous gap to look at?
                     if len(gaps) > 0:
@@ -492,7 +156,7 @@ class SequenceProfile:
                             if (gaps[-1][0] + gaps[-1][1]) == i:
 
                                 # Is the previous gap short enough to be added to?
-                                if gaps[-1][1] < max_gap_merge:
+                                if gaps[-1][1] < self._max_gap_merge:
 
                                     # Attach to previous gap
                                     gaps[-1][1] += 1
@@ -512,7 +176,7 @@ class SequenceProfile:
                 assigned = False
 
                 # Should we try to merge gaps?
-                if merge_gaps:
+                if self._merge_gaps:
 
                     # Is there a previous gap to look at?
                     if len(gaps) > 0:
@@ -525,7 +189,7 @@ class SequenceProfile:
                             if (gaps[-1][0] + gaps[-1][1]) == i:
 
                                 # Is the previous gap short enough to be added to?
-                                if gaps[-1][1] < max_gap_merge:
+                                if gaps[-1][1] < self._max_gap_merge:
 
                                     # Attach to previous gap
                                     gaps[-1][1] += 1
@@ -540,7 +204,7 @@ class SequenceProfile:
         for i in range(len(base_profile)):
             p = np.zeros(4,dtype=np.float)
             for base in base_profile[i]:
-                p += BASE_DICT[base]
+                p += data.BASE_DICT[base]
             p = p/len(base_profile[i])
             self._prob_profile[i,:] = p
 
@@ -579,9 +243,14 @@ class SequenceProfile:
 
 
     def _align_sequence(self,prob_array,align_three_prime=False):
+        """
+        Align the sequence stored in probaility array to the reference
+        sequence data.  If align_three_prime, treat as a reverse read.
+        """
 
         result = None
 
+        # Try every gap combination
         for i in range(len(self._gap_masks)):
 
             gap_mask = np.copy(self._gap_masks[i])
@@ -638,7 +307,7 @@ class SequenceProfile:
 
             # Now align the input array to this particular gap pattern
             alignment = np.zeros((self._total_length,4),dtype=np.float)
-            alignment[:,:] = BASE_FREQS
+            alignment[:,:] = self._base_freq_no_gap
             alignment[target_indexes,:] = to_align[gap_indexes,:]
 
             # Make all gaps 0.0 --> no probability there
@@ -692,11 +361,11 @@ class SequenceProfile:
             N = len(raw_bases[i])
             for j in range(N):
                 if not align_three_prime:
-                    base_stack[i,j] = BASE_TO_INDEX[raw_bases[i][j]]
+                    base_stack[i,j] = data.BASE_TO_INDEX[raw_bases[i][j]]
                     qual_stack[i,j] = raw_quals[i][j]
                 else:
                     offset = self._total_length - N
-                    base_stack[i,(offset + j)] = BASE_TO_INDEX[raw_bases[i][j]]
+                    base_stack[i,(offset + j)] = data.BASE_TO_INDEX[raw_bases[i][j]]
                     qual_stack[i,(offset + j)] = raw_quals[i][j]
 
 
@@ -708,7 +377,7 @@ class SequenceProfile:
             # No data for this column; dump raw frequencies to indicate
             # uncertainty at this column.
             if np.sum(has_data) == 0:
-                out[i,:] = BASE_FREQS
+                out[i,:] = self._base_freq_no_gap
                 continue
 
             last_column_with_data = i
@@ -736,15 +405,38 @@ class SequenceProfile:
 
         # Only take data for columns that were actually seen.
         out = out[:(last_column_with_data + 1),:]
+
+        # Find best alignment
         aligned = self._align_sequence(out,align_three_prime)
 
-        final_out = 0.20*np.ones((self._total_length,5),dtype=np.float)
+        # Construct final output -- if we do not have data, set to bases at
+        # frequencies observed in reference sequence
+        final_out = np.zeros((self._total_length,5),dtype=np.float)
+        final_out[:,:] = self._base_freq_with_gap
+
+        # Load in aligned data
         final_out[:,:4] = aligned
 
+        # Expand totally ambiguous positions to include the possibility of being
+        # a gap
+        ambig = np.sum(aligned[:] == self._base_freq_no_gap,1) == aligned.shape[1]
+        final_out[ambig,:] = self._base_freq_with_gap
 
-        return out
+        # Set gaps
+        gap_positions = np.sum(aligned,1) == 0
+        final_out[gap_positions,:] = 0.0
+        final_out[gap_positions,4] = 1.0
 
+        return final_out
 
     @property
     def total_length(self):
         return self._total_length
+
+    @property
+    def base_freq_no_gap(self):
+        return self._base_freq_no_gap
+
+    @property
+    def base_freq_with_gap(self):
+        return self._base_freq_with_gap

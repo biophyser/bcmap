@@ -92,8 +92,9 @@ class Experiment:
         return out_dict
 
     def _call_consensus(self,n_probs,c_probs,cutoff=0.5):
-
-        diag_mask = np.eye(4,dtype=np.bool)
+        """
+        Call the consensus between N-terminal and C-terminal reads.
+        """
 
         num_mismatch = 0
         consensus = []
@@ -103,34 +104,27 @@ class Experiment:
             n_data = n_probs[i,:]
             c_data = c_probs[i,:]
 
-            # Signal from N channel
-            if np.sum(n_data) > 0:
+            # Do n and c signals differ from base_freq_with_gap (i.e. no
+            # signal at all)?
+            n_has_signal = np.sum(n_data == self._ref.base_freq_with_gap) != 5
+            c_has_signal = np.sum(c_data == self._ref.base_freq_with_gap) != 5
 
-                # Signal from C channel, average signals
-                if np.sum(c_data) > cutoff:
-                    average_prob = (n_data + c_data)/2
-
-                # No signal from C channel, just take N channel
-                else:
-                    average_prob = n_data
-
-            # No signal from N channel
+            # Average signals depending on whether they have signal
+            if n_has_signal and c_has_signal:
+                average_prob = (n_data + c_data)/2
+            elif n_has_signal and not c_has_signal:
+                average_prob = n_data
+            elif not n_has_signal and c_has_signal:
+                average_prob = c_data
             else:
-
-                # Signal from C channel, use that one
-                if np.sum(c_data) > 0:
-                    average_prob = c_data
-
-                # No signal from either channel
-                else:
-                    average_prob = np.zeros(n_data.shape,dtype=np.float)
+                average_prob = n_data
 
             above_cutoff_mask = average_prob >= cutoff
 
             # High-probability for one base
             if np.sum(above_cutoff_mask) == 1:
                 base = np.argmax(average_prob)
-                consensus.append(INDEX_TO_BASE[base])
+                consensus.append(data.INDEX_TO_BASE[base])
                 support.append(average_prob[base])
 
             # No good data
@@ -228,14 +222,12 @@ class Experiment:
                 consensus_out.flush()
                 prot_out.flush()
                 print(i,"of",len(clusters_seen))
-                break
+                break ### HACK HACK HACK
 
         # Close output files
         cluster_out.close()
         consensus_out.close()
         prot_out.close()
-
-
 
 
     def create_map(self,n_term_file,c_term_file,out_root):
