@@ -242,6 +242,25 @@ class SequenceProfile:
             self._gap_masks.append(gap_mask)
             self._gap_indexes.append(gap_indexes)
 
+            """
+            # HACK HACK HACK --> allow a *single* gap in addition to the
+            # big gap masks above
+            for i in range(self._total_length):
+
+                new_gap_mask = np.copy(gap_mask)
+                new_gap_mask[i] = True
+                gap_indexes = -1*np.ones(self._total_length,dtype=np.int)
+                counter = 0
+                for j in range(self._total_length):
+                    if not new_gap_mask[j]:
+                        gap_indexes[j] = counter
+                        counter += 1
+                self._gap_masks.append(new_gap_mask)
+                self._gap_indexes.append(gap_indexes)
+            """
+
+
+
 
     def _align_sequence(self,prob_array,align_three_prime=False):
         """

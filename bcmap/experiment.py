@@ -65,34 +65,7 @@ class Experiment:
         self._cluster_dict = cluster_dict
         self._inverse_dict = inverse_dict
 
-    def _load_reads(self,read_file):
-        """
-        Create a dictionary where the keys are clusters in cluster_dict
-        and the values are tuples of sequence/phred scores taken from
-        read_file.
-        """
-
-        key_size = len(list(self._cluster_dict.keys())[0])
-
-        out_dict = {}
-        with open(read_file) as f:
-            for l in f:
-                col = l.split("|")
-
-                bc = col[0][:key_size].strip()
-                bases = col[2].strip()
-                quals = np.array([data.Q_DICT[k] for k in list(col[3].strip())])
-
-                cluster = self._cluster_dict[bc]
-
-                try:
-                    out_dict[cluster].append((bases,quals))
-                except KeyError:
-                    out_dict[cluster] = [(bases,quals)]
-
-        return out_dict
-
-    def _call_consensus(self,n_probs,c_probs,cutoff=0.7):
+    def _call_consensus(self,n_probs,c_probs,signal_cutoff=0.3,call_cutoff=0.6):
         """
         Call the consensus between N-terminal and C-terminal reads.
         """
@@ -107,24 +80,22 @@ class Experiment:
 
             # Do n and c signals differ from base_freq_with_gap (i.e. no
             # signal at all)?
-            n_has_signal = np.sum(n_data == self._ref.base_freq_with_gap) != 5
-            c_has_signal = np.sum(c_data == self._ref.base_freq_with_gap) != 5
+            n_has_signal = np.max(n_data) > signal_cutoff
+            c_has_signal = np.max(c_data) > signal_cutoff
 
             # Average signals depending on whether they have signal
             if n_has_signal and c_has_signal:
-                summed_prob = n_data + c_data
-                average_prob = summed_prob/2
+                average_prob = (n_data + c_data)/2
             elif n_has_signal and not c_has_signal:
-                summed_prob = n_data
-                average_prob = summed_prob
+                average_prob = n_data
             elif not n_has_signal and c_has_signal:
-                summed_prob = c_data
-                average_prob = summed_prob
+                average_prob = c_data
             else:
-                summed_prob = n_data
-                average_prob = summed_prob
+                average_prob = (n_data + c_data)/2
 
-            above_cutoff_mask = summed_prob >= cutoff
+            # See how many bases are above call_cutoff in their
+            # probability
+            above_cutoff_mask = average_prob >= call_cutoff
 
             # High-probability for one base
             if np.sum(above_cutoff_mask) == 1:
@@ -134,10 +105,20 @@ class Experiment:
 
             # No good data
             elif np.sum(above_cutoff_mask) == 0:
-                consensus.append("N")
-                support.append(np.max(average_prob))
 
-            # Conflicting data
+                # If the value is low because of two, conflicting, votes
+                # record as a mismatch.
+                if np.max(n_data) > call_cutoff and np.max(c_data) > call_cutoff:
+                    consensus.append("X")
+                    support.append(np.max(average_prob))
+                    num_mismatch += 1
+
+                # Otherwise, it is just poor data.
+                else:
+                    consensus.append("N")
+                    support.append(np.max(average_prob))
+
+            # Conflicting data (won't ever happen if call_cutoff is > 0.5)
             else:
                 consensus.append("X")
                 support.append(np.max(average_prob))
@@ -148,6 +129,7 @@ class Experiment:
     def map_from_cluster_files(self,cluster_directory,key_size=25):
 
         cluster_files = os.listdir(cluster_directory)
+        cluster_files.sort()
         out_root = cluster_directory
 
         # Make output file names
@@ -188,10 +170,11 @@ class Experiment:
                     if bases[-9:] == "GCCTAATAA":
                         c_term_reads.append((bases,quals))
                     else:
+                        ## GET RID OF TAATAA FRAGMENT...
                         tmp_bases = bases[:-5]
-                        tmp_quals = quals[:-5] ##HACK HACK HACK  GET RID OF
-                                               ## TAATAA FRAGMENT...
+                        tmp_quals = quals[:-5]
                         n_term_reads.append((tmp_bases,tmp_quals))
+                    ##HACK HACK HACK
 
                     unique_bc[bc] = cluster_number
 
