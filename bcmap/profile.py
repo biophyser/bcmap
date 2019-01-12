@@ -15,7 +15,7 @@ class SequenceProfile:
                     making all possible gap combinations (default to True)
         max_gap_merge: maximum number of sequential gaps to merge.  defaults to
                        3, assuming gaps are codons.
-        """"
+        """
 
         self._ref_file = ref_file
         self._merge_gaps = merge_gaps
@@ -95,8 +95,8 @@ class SequenceProfile:
 
         all_sequence_data = list(wt)
         all_sequence_data.extend(list(mut))
-        num_gaps = sum([1 for i s in all_sequence_data if s == "-"])
-        non_gaps = sum([1 for i s in all_sequence_data if s != "-"])
+        num_gaps = sum([1 for s in all_sequence_data if s == "-"])
+        non_gaps = sum([1 for s in all_sequence_data if s != "-"])
         total = num_gaps + non_gaps
 
         freq = np.zeros(4,dtype=np.float)
@@ -107,6 +107,7 @@ class SequenceProfile:
                 freq[:] += data.BASE_DICT[s]
 
         self._base_freq_no_gap = freq/non_gaps
+        self._ln_base_freq_no_gap = np.log(self._base_freq_no_gap)
 
         freq_with_gap = np.zeros(5,dtype=np.float)
         freq_with_gap[:4] = self._base_freq_no_gap*(non_gaps/total)
@@ -339,7 +340,22 @@ class SequenceProfile:
             if keep_result:
                 result = [score,num_gaps,alignment]
 
-        return result[2]
+        alignment = result[2]
+
+        # Everything after the last observation should be ambiguous, not
+        # a gap.
+        gaps = np.sum(alignment,1) == 0
+        indexes = np.arange(alignment.shape[0],dtype=np.int)
+        if not align_three_prime:
+            indexes[gaps] = -1
+            last_non_gap = np.max(indexes) + 1
+            alignment[last_non_gap:,:] = self._base_freq_no_gap
+        else:
+            indexes[gaps] = np.max(indexes)
+            first_non_gap = np.argmin(indexes)
+            alignment[:first_non_gap,:] = self._base_freq_no_gap
+
+        return alignment
 
     def calc_base_prob(self,reads,align_three_prime=False):
         """
@@ -368,7 +384,6 @@ class SequenceProfile:
                     base_stack[i,(offset + j)] = data.BASE_TO_INDEX[raw_bases[i][j]]
                     qual_stack[i,(offset + j)] = raw_quals[i][j]
 
-
         out = np.zeros((self._total_length,4),dtype=np.float)
         for i in range(self._total_length):
 
@@ -396,8 +411,15 @@ class SequenceProfile:
             ln_e = np.log(quals)/3
 
             # Calculate ln[P(base|vector_of_observed_bases)]
+            out[i,:] = self._ln_base_freq_no_gap
             for j in range(4):
                 out[i,j] += np.sum(ln_not_e[bases == j]) + np.sum(ln_e[bases != j])
+
+            # Set best value to 0. This avoids numerical problems when taking
+            # exponential.  The best is always 0 -> exp(0) = 1.  The worst could
+            # be exp(-10000) -> 0, but safely b/c denominator is always at least
+            # one
+            out[i,:] = out[i,:] - np.max(out[i,:])
 
             # Normalize
             e_out = np.exp(out[i,:])
@@ -412,7 +434,6 @@ class SequenceProfile:
         # Construct final output -- if we do not have data, set to bases at
         # frequencies observed in reference sequence
         final_out = np.zeros((self._total_length,5),dtype=np.float)
-        final_out[:,:] = self._base_freq_with_gap
 
         # Load in aligned data
         final_out[:,:4] = aligned

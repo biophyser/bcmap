@@ -1,5 +1,6 @@
 
 from . import data
+from .profile import SequenceProfile
 
 import numpy as np
 import os
@@ -91,7 +92,7 @@ class Experiment:
 
         return out_dict
 
-    def _call_consensus(self,n_probs,c_probs,cutoff=0.5):
+    def _call_consensus(self,n_probs,c_probs,cutoff=0.7):
         """
         Call the consensus between N-terminal and C-terminal reads.
         """
@@ -111,15 +112,19 @@ class Experiment:
 
             # Average signals depending on whether they have signal
             if n_has_signal and c_has_signal:
-                average_prob = (n_data + c_data)/2
+                summed_prob = n_data + c_data
+                average_prob = summed_prob/2
             elif n_has_signal and not c_has_signal:
-                average_prob = n_data
+                summed_prob = n_data
+                average_prob = summed_prob
             elif not n_has_signal and c_has_signal:
-                average_prob = c_data
+                summed_prob = c_data
+                average_prob = summed_prob
             else:
-                average_prob = n_data
+                summed_prob = n_data
+                average_prob = summed_prob
 
-            above_cutoff_mask = average_prob >= cutoff
+            above_cutoff_mask = summed_prob >= cutoff
 
             # High-probability for one base
             if np.sum(above_cutoff_mask) == 1:
@@ -164,8 +169,12 @@ class Experiment:
 
         for i, cf in enumerate(cluster_files):
 
+            # cluster number
+            cluster_number = cf.split("_")[1].split(".")[0]
+
             n_term_reads = []
             c_term_reads = []
+            unique_bc = {}
             with open(os.path.join(cluster_directory,cf)) as f:
                 for l in f:
                     col = l.split("|")
@@ -174,20 +183,21 @@ class Experiment:
                     bases = col[2].strip()
                     quals = np.array([data.Q_DICT[k] for k in list(col[3].strip())])
 
-                    if bases[-6:] == "TAATAA":
+                    ##### SOME SERIOUS HACKING HERE --> THIS SHOULD GO UP
+                    # IN PROCESS READS FOR PRODUCTION XXXXX
+                    if bases[-9:] == "GCCTAATAA":
                         c_term_reads.append((bases,quals))
                     else:
-                        n_term_reads.append((bases,quals))
+                        tmp_bases = bases[:-5]
+                        tmp_quals = quals[:-5] ##HACK HACK HACK  GET RID OF
+                                               ## TAATAA FRAGMENT...
+                        n_term_reads.append((tmp_bases,tmp_quals))
 
-                    # Write cluster/barcode pairs to a file
-                    cluster_out.write("{}:{}\n".format(bc,cf.split("_")[0]))
+                    unique_bc[bc] = cluster_number
 
             # Make sure that both N- and C-terminal sequences are seen
             if len(n_term_reads) == 0 or len(c_term_reads) == 0:
                 continue
-
-            # cluster number
-            c = cf.split("_")[1].split(".")[0]
 
             # Get N- and C-terminal sequences for this cluster
             n_term_probs = self._ref.calc_base_prob(n_term_reads,align_three_prime=False)
@@ -207,105 +217,27 @@ class Experiment:
             to_write = "".join(to_write)
 
             consensus = "".join(consensus)
-            consensus_out.write(">cluster_{},{}\n{}\n{}\n".format(c,
+            consensus_out.write(">cluster_{},{}\n{}\n{}\n".format(cluster_number,
                                                                   num_mismatch,
                                                                   consensus,
                                                                   to_write))
 
             protein = translate(consensus)
-            prot_out.write(">cluster_{},{}\n{}\n".format(c,num_mismatch,protein))
+            prot_out.write(">cluster_{},{}\n{}\n".format(cluster_number,
+                                                         num_mismatch,
+                                                         protein))
 
+            # Write out cluster numbers
+            for bc in unique_bc.keys():
+                # Write cluster/barcode pairs to a file
+                cluster_out.write("{}:{}\n".format(bc,cluster_number))
 
             # Flush output files
             if i % 1000 == 0:
                 cluster_out.flush()
                 consensus_out.flush()
                 prot_out.flush()
-                print(i,"of",len(clusters_seen))
-                break ### HACK HACK HACK
-
-        # Close output files
-        cluster_out.close()
-        consensus_out.close()
-        prot_out.close()
-
-
-    def create_map(self,n_term_file,c_term_file,out_root):
-
-        # Make output file names
-        cluster_out_file = "{}.clusters".format(out_root)
-        consensus_out_file = "{}_dna.fasta".format(out_root)
-        prot_out_file = "{}_prot.fasta".format(out_root)
-
-        # Make sure output files do not exist
-        if os.path.isfile(cluster_out_file) or \
-           os.path.isfile(consensus_out_file) or \
-           os.path.isfile(prot_out_file):
-           err = "output file(s) exist\n"
-           raise FileExistsError(err)
-
-        # Load in sequences, mapping them to unique cluster numbers
-        n_term_reads = self._load_reads(n_term_file)
-        c_term_reads = self._load_reads(c_term_file)
-
-        # Create list of all clusters seen
-        clusters_seen = list(n_term_reads.keys())
-        clusters_seen.extend(c_term_reads.keys())
-        clusters_seen = list(set(clusters_seen))
-        clusters_seen.sort()
-
-        # Open output file pipes
-        cluster_out = open(cluster_out_file,"w")
-        consensus_out = open(consensus_out_file,"w")
-        prot_out = open(prot_out_file,"w")
-
-        # Go through every cluster
-        for i, c in enumerate(clusters_seen):
-
-            # Make sure that N- and C-termini have both been seen in this
-            # cluster
-            try:
-                n_term_reads[c]
-                c_term_reads[c]
-            except KeyError:
-                continue
-
-            # Get N- and C-terminal sequences for this cluster
-            n_term_probs = self._ref.calc_base_prob(n_term_reads[c],align_three_prime=False)
-            c_term_probs = self._ref.calc_base_prob(c_term_reads[c],align_three_prime=True)
-
-            # Get the consensus sequence defined by these
-            consensus, support, num_mismatch = self._call_consensus(n_term_probs,
-                                                                    c_term_probs)
-
-            #Create human-readable support
-            to_write = []
-            for s in support:
-                v = "{:.1f}".format(np.round(s))
-                if v == "1.0": v = "0.9"
-
-                to_write.append(v[-1])
-            to_write = "".join(to_write)
-
-            consensus = "".join(consensus)
-            consensus_out.write(">cluster_{},{}\n{}\n{}\n".format(c,
-                                                                  num_mismatch,
-                                                                  consensus,
-                                                                  to_write))
-
-            protein = translate(consensus)
-            prot_out.write(">cluster_{},{}\n{}\n".format(c,num_mismatch,protein))
-
-            # Write cluster/barcode pairs to a file
-            for bc in self._inverse_dict[c]:
-                cluster_out.write("{}:{}\n".format(bc,c))
-
-            # Flush output files
-            if i % 1000 == 0:
-                cluster_out.flush()
-                consensus_out.flush()
-                prot_out.flush()
-                print(i,"of",len(clusters_seen))
+                print(i,"of",len(cluster_files))
 
         # Close output files
         cluster_out.close()

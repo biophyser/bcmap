@@ -5,6 +5,8 @@ Constants and data used across the package.
 __author__ = "Michael J. Harms"
 __date__ = "2019-01-12"
 
+import numpy as np
+
 BASE_DICT = {"A":[1.00,0.00,0.00,0.00],
              "C":[0.00,1.00,0.00,0.00],
              "G":[0.00,0.00,1.00,0.00],
