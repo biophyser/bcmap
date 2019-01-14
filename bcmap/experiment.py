@@ -11,43 +11,11 @@ class Experiment:
     """
     """
 
-    def __init__(self,ref_file,cluster_file,key_size=25):
+    def __init__(self,ref_file,key_size=25):
 
         self._ref_file = ref_file
-        self._cluster_file = cluster_file
         self._key_size = key_size
-
         self._ref = SequenceProfile(self._ref_file)
-        self._load_clusters()
-
-    def _load_clusters(self):
-        """
-        Load a file containing barcodes placed into clusters.
-
-        Returns:
-            a dictionary with barcodes as keys and cluster indexes as values.
-            a dictionary with clusters as keys and lists of barcodes as values.
-        """
-
-        cluster_counter = -1
-        cluster_dict = {}
-        inverse_dict = {}
-        with open(self._cluster_file) as f:
-            for l in f:
-                col = l.split()
-                cluster = int(col[0])
-                if cluster == -1:
-                    cluster = cluster_counter
-                    cluster_counter = cluster_counter - 1
-                cluster_dict[col[1].strip()[:self._key_size]] = cluster
-
-                try:
-                    inverse_dict[cluster].append(col[1].strip()[:self._key_size])
-                except KeyError:
-                    inverse_dict[cluster] = [col[1].strip()[:self._key_size]]
-
-        self._cluster_dict = cluster_dict
-        self._inverse_dict = inverse_dict
 
     def _call_consensus(self,n_probs,c_probs,signal_cutoff=0.3,call_cutoff=0.80):
         """
