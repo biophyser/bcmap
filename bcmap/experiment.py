@@ -124,9 +124,9 @@ class Experiment:
                 if bases[-9:] == "GCCTAATAA":
                     c_term_reads.append((bases,quals))
                 else:
-                    if len(bases) > 346:
-                        bases = bases[:346]
-                        quals = quals[:346]
+                    if len(bases) > 345:
+                        bases = bases[:345]
+                        quals = quals[:345]
 
                     # Trim off any extra TAA
                     while bases[-3:] == "TAA":
