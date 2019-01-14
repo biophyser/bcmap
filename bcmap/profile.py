@@ -1,20 +1,28 @@
 
 from . import data
+from . import util
 
 import numpy as np
-import itertools
+import itertools, copy
 
 class SequenceProfile:
 
     def __init__(self,ref_file,merge_gaps=True,max_gap_merge=3):
         """
-        ref_file: file describing the expected characteristics of the library
-                  First line should be a sequence.
-                  Second line should be sequence with all possible mutations.
+        ref_file: File describing the expected characteristics of the library.
+                  The first line should be a sequence, the second line should be
+                  a sequence with all possible mutations to the first.  The
+                  two sequences should be gapped appropriately relative to each
+                  other.  Gaps in the first sequence indicate insertions in the
+                  mutant.  Gaps in the second sequence indicate deletions in the
+                  mutant.  These sequences should use the standard nucleic acid
+                  notation (ACGT-).  Degenerate positions are also allowed
+                  (e.g.: N means any base, R means A or G, etc.)
         merge_gaps: boolean.  whether or not to merge sequential gaps when
-                    making all possible gap combinations (default to True)
-        max_gap_merge: maximum number of sequential gaps to merge.  defaults to
-                       3, assuming gaps are codons.
+                    making all possible gap combinations (default to True).
+        max_gap_merge: Maximum number of sequential gaps to merge.  Defaults to
+                       3, assuming gaps are codons.  This means six sequential
+                       gaps would be treated as two blocks of three gaps.
         """
 
         self._ref_file = ref_file
@@ -22,44 +30,6 @@ class SequenceProfile:
         self._max_gap_merge = max_gap_merge
         self._read_ref_file()
 
-    def _seq_to_prob(self,input_array):
-        """
-        Convert a string representation of a DNA sequence to a probability
-        array.
-
-        ACGT becomes:
-
-        [[1,0,0,0],
-         [0,1,0,0],
-         [0,0,1,0],
-         [0,0,0,1]]
-        """
-
-        out = np.zeros((len(input_array),4),dtype=np.float)
-        for i in range(len(input_array)):
-            out[i,:] = data.BASE_DICT[input_array[i]]
-
-        return out
-
-    def _array_diff(self,array_one,array_two,remove_gaps=True):
-        """
-        Take RMSD difference between two arrays of the same shape.
-        """
-
-        if array_one.shape != array_two.shape:
-            err = "arrays must have the same shape\n"
-            raise ValueError(err)
-
-        array1 = np.copy(array_one)
-        array2 = np.copy(array_two)
-
-        # Do not compare gaps, where probability density is 0
-        # by definition.
-        if remove_gaps:
-            array2[np.sum(array1,1) == 0,:] = 0.0
-            array1[np.sum(array2,1) == 0,:] = 0.0
-
-        return np.sum((array1 - array2)**2)/array1.shape[0]
 
     def _read_ref_file(self):
         """
@@ -87,14 +57,25 @@ class SequenceProfile:
         wt = lines[0]
         mut = lines[1]
 
-        self._total_length = len(wt)
+        # Filter out positions where both wt and mut are gaps
+        tmp_wt = []
+        tmp_mut = []
+        for i in range(len(wt)):
+            if wt[i] == "-" and mut[i] == "-":
+                continue
+            tmp_wt.append(wt[i])
+            tmp_mut.append(mut[i])
+
+        self._wt = tmp_wt[:]
+        self._mut = tmp_mut[:]
+        self._total_length = len(self._wt)
 
         # ------------------------------------------------------------------- #
-        # Calcualate frequencies of bases seen in alignmnet
+        # Calculate total frequencies of bases seen in the alignment
         # ------------------------------------------------------------------- #
 
-        all_sequence_data = list(wt)
-        all_sequence_data.extend(list(mut))
+        all_sequence_data = list(self._wt)
+        all_sequence_data.extend(list(self._mut))
         num_gaps = sum([1 for s in all_sequence_data if s == "-"])
         non_gaps = sum([1 for s in all_sequence_data if s != "-"])
         total = num_gaps + non_gaps
@@ -119,25 +100,20 @@ class SequenceProfile:
         # Parse gaps in the alignment
         # ------------------------------------------------------------------- #
 
-        # Walk though sequence, recording non-gap sequence (real_wt, real_mut)
+        # Walk though sequence, recording non-gap sequence (wt_no_gap, mut_no_gap)
         # and position of each gap (gaps)
-        real_wt = []
-        real_mut = []
+        wt_no_gap = []
+        mut_no_gap = []
         base_profile = []
         gaps = []
-        for i in range(len(wt)):
-
-            # Don't care about gaps shared with wildtype and mutant
-            if wt[i] == "-" and mut[i] == "-":
-                self._total_length -= 1
-                continue
+        for i in range(len(self._wt)):
 
             base_profile.append([])
 
             # Record wildtype sequence
-            if wt[i] != "-":
-                real_wt.append(wt[i])
-                base_profile[-1].append(wt[i])
+            if self._wt[i] != "-":
+                wt_no_gap.append(self._wt[i])
+                base_profile[-1].append(self._wt[i])
 
             # Insertion
             else:
@@ -168,9 +144,9 @@ class SequenceProfile:
                     gaps.append([i,1,1])
 
             # Record mutant sequence
-            if mut[i] != "-":
-                real_mut.append(mut[i])
-                base_profile[-1].append(mut[i])
+            if self._mut[i] != "-":
+                mut_no_gap.append(self._mut[i])
+                base_profile[-1].append(self._mut[i])
 
             # Deletion
             else:
@@ -210,8 +186,8 @@ class SequenceProfile:
             self._prob_profile[i,:] = p
 
         # Convert wildtype and mutant sequences into probability arrays
-        self._real_wt = self._seq_to_prob(real_wt)
-        self._real_mut = self._seq_to_prob(real_mut)
+        self._wt_no_gap = util.seq_to_prob(wt_no_gap)
+        self._mut_no_gap = util.seq_to_prob(mut_no_gap)
 
         # Make all possible combinations of the gaps
         gap_combos = []
@@ -241,26 +217,6 @@ class SequenceProfile:
             # Record gap patterns
             self._gap_masks.append(gap_mask)
             self._gap_indexes.append(gap_indexes)
-
-            """
-            # HACK HACK HACK --> allow a *single* gap in addition to the
-            # big gap masks above
-            for i in range(self._total_length):
-
-                new_gap_mask = np.copy(gap_mask)
-                new_gap_mask[i] = True
-                gap_indexes = -1*np.ones(self._total_length,dtype=np.int)
-                counter = 0
-                for j in range(self._total_length):
-                    if not new_gap_mask[j]:
-                        gap_indexes[j] = counter
-                        counter += 1
-                self._gap_masks.append(new_gap_mask)
-                self._gap_indexes.append(gap_indexes)
-            """
-
-
-
 
     def _align_sequence(self,prob_array,align_three_prime=False):
         """
@@ -335,7 +291,7 @@ class SequenceProfile:
 
             # Calculate the difference between this alignment and the probability
             # profile from the input file.
-            score = self._array_diff(self._prob_profile,alignment)
+            score = util.array_diff(self._prob_profile,alignment)
             num_gaps = np.sum(gap_mask)
 
             # Decide whether this alignment is better than the best one
@@ -361,33 +317,35 @@ class SequenceProfile:
 
         alignment = result[2]
 
-        # Everything after the last observation should be ambiguous, not
-        # a gap.
+        # Finally, everything after the last observation should be ambiguous,
+        # not a gap.
         gaps = np.sum(alignment,1) == 0
         indexes = np.arange(alignment.shape[0],dtype=np.int)
         if not align_three_prime:
+            # Set gaps to -1.  The biggest value in the index array will now be
+            # the rightmost non-gap character.  Set everything after this to
+            # the raw base frequencies
             indexes[gaps] = -1
             last_non_gap = np.max(indexes) + 1
             alignment[last_non_gap:,:] = self._base_freq_no_gap
         else:
+            # Set gaps to array maximum.  The smallest value in index_array will
+            # now be the leftmost non-gap character.  Set everything before this
+            # to the raw base frequencies.
             indexes[gaps] = np.max(indexes)
             first_non_gap = np.argmin(indexes)
             alignment[:first_non_gap,:] = self._base_freq_no_gap
 
         return alignment
 
-    def calc_base_prob(self,reads,align_three_prime=False):
+
+    def calc_base_prob(self,raw_bases,raw_quals,align_three_prime=False):
         """
         Calculate the probability that each position in an alignment has
-        a particular identity.  Returns a total_length x 4 array where each
+        a particular identity.  Returns a total_length x 5 array where each
         row sums to 1, indicating the probability that position is a
-        particular base.  If a row sums to 0.0, it is a gap.
+        particular base.
         """
-
-        # somewhat cryptic call splits:
-        # reads = [(s1,q1),(s2,q2),...(sn,qn)] into
-        # (s1,s2,...,sn), (q1,q2,...,qn)
-        raw_bases, raw_quals = zip(*reads)
 
         # Load bases from reads and quality scores into stacks
         base_stack = -1*np.ones((len(raw_bases),self._total_length),dtype=np.int)
@@ -429,8 +387,10 @@ class SequenceProfile:
             # base frequencies are equal... close enough for our purposes)
             ln_e = np.log(quals)/3
 
-            # Calculate ln[P(base|vector_of_observed_bases)]
+            # ln[P(base)] ...
             out[i,:] = self._ln_base_freq_no_gap
+
+            # ... + ln[P(vector_of_observed_bases|base)]
             for j in range(4):
                 out[i,j] += np.sum(ln_not_e[bases == j]) + np.sum(ln_e[bases != j])
 
@@ -440,7 +400,7 @@ class SequenceProfile:
             # one
             out[i,:] = out[i,:] - np.max(out[i,:])
 
-            # Normalize
+            # Normalize (sum(e_out) = P(vector_of_observed_bases))
             e_out = np.exp(out[i,:])
             out[i,:] = e_out/np.sum(e_out)
 
@@ -468,6 +428,214 @@ class SequenceProfile:
         final_out[gap_positions,4] = 1.0
 
         return final_out
+
+    def translate(self,base_sequence):
+        """
+        Translate a base sequence, using the reference sequence to call codons
+        with a missing base or two.
+        """
+
+        if len(base_sequence) != self._total_length:
+            err = "input sequence length must be same as sequence profile\n"
+            raise ValueError(err)
+
+        translation = []
+        for i in range(len(self.amino_acid_profile)):
+            try:
+                aa = self.amino_acid_profile[i][base_sequence[i*3:((i+1)*3)]]
+            except KeyError:
+                aa = "X"
+            translation.append(aa)
+
+        return translation
+
+    def get_allele(self,base_sequence):
+        """
+        Get the allele given by a base sequence.  The wildtype amino acid is 0,
+        other amino acids are 1, 2, 3 ... for other possibilities.
+        """
+
+        if len(base_sequence) != self._total_length:
+            err = "input sequence length must be same as sequence profile\n"
+            raise ValueError(err)
+
+        allele = []
+        translation = self.translate(base_sequence)
+        for i, aa in enumerate(translation):
+            if self.allele_call[i] is not None:
+
+                try:
+                    allele.append(self.allele_call[i][aa])
+                except KeyError:
+                    allele.append("?")
+
+        return allele
+
+    def allele_summary(self):
+        """
+        Summarize the mapping between amino acids and their summarized
+        allele calls.
+        """
+
+        for i in range(len(self.allele_call)):
+
+            if self.allele_call[i] is not None:
+
+                to_write = []
+                for k in self.allele_call[i].keys():
+                    to_write.append((self.allele_call[i][k],k))
+                to_write.sort()
+
+                out = ["{}: ".format(i+1)]
+                for j in range(len(to_write)):
+                    out.append("{} = {}; ".format(to_write[j][0],to_write[j][1]))
+
+                print("".join(out))
+
+
+    @property
+    def allele_call(self):
+        """
+        Dictionary returning the allele call for a given amino acid at a given
+        position.
+        """
+
+        try:
+            return self._allele_call
+        except AttributeError:
+            pass
+
+        possible_alleles = "0123456789ABCDEFGHIJK"
+
+        allele_call = []
+        for i in range(len(self.amino_acid_profile)):
+            aa = list(set(self.amino_acid_profile[i].values()))
+
+            # Interesting call
+            if len(aa) == 1:
+                allele_call.append(None)
+            else:
+                call_dict = {}
+                wt_aa = data.GENCODE["".join(self._wt[(i*3):((i+1)*3)]) ]
+                call_dict[wt_aa] = "0"
+                aa.remove(wt_aa)
+                aa.sort()
+                for j, allele in enumerate(aa):
+                    call_dict[allele] = possible_alleles[j+1]
+                allele_call.append(call_dict)
+
+        self._allele_call = copy.deepcopy(allele_call)
+
+        return self._allele_call
+
+    @property
+    def library_combos(self):
+        """
+        Possible amino acid combinations in the library.
+        """
+
+        try:
+            return self._library_combos
+        except AttributeError:
+            pass
+
+        to_expand = []
+        for i in range(len(self.amino_acid_profile)):
+            aa = set(self.amino_acid_profile[i].values())
+            to_expand.append(aa)
+
+        self._library_combos = list(itertools.product(*to_expand))
+
+        return self._library_combos
+
+    @property
+    def amino_acid_profile(self):
+        """
+        Position-specific codon lookup table.
+        """
+
+        # Only calculate if you need it
+        try:
+            return self._amino_acid_profile
+        except AttributeError:
+            pass
+
+        self._degenerate_table = util.codon_degeneracy(data.GENCODE)
+
+        if self._total_length % 3 != 0:
+            err = "sequence must be divisible by three (in frame)\n"
+            raise ValueError(err)
+
+        self._amino_acid_profile = []
+        for i in range(0,self._total_length,3):
+
+            possible_codons = []
+            possible_aa = []
+
+            # Set of three base positions in both wildtype and mutant
+            triplet_bases = [self._wt[i:i+3]]
+            if self._mut[i:i+3] != self._wt[i:i+3]:
+                triplet_bases.append(self._mut[i:i+3])
+
+            # For each of the base triplets
+            for j in range(len(triplet_bases)):
+
+                # Unpack into all possible bases at each position.  (This
+                # deals with notation like R -> A or T).
+                triplet = triplet_bases[j]
+                possible_bases = []
+                for k in range(3):
+                    possible_bases.append(data.UNPACK_BASE[triplet[k]])
+
+                # Construct a list of all possible codons given these triplets
+                for c in itertools.product(*possible_bases):
+                    possible_codons.append("".join(c))
+                    possible_aa.append(data.GENCODE[possible_codons[-1]])
+
+            # key a list of codons to each possible amino acid.  Include
+            # codons with single "N" values in them.
+            aa_dict = {}
+            for j in range(len(possible_aa)):
+
+                aa = possible_aa[j]
+
+                try:
+                    aa_dict[aa].append(possible_codons[j])
+                except KeyError:
+                    aa_dict[aa] = [possible_codons[j]]
+
+                to_expand = [(possible_codons[j][0],"N"),
+                             (possible_codons[j][1],"N"),
+                             (possible_codons[j][2],"N")]
+
+                for c in itertools.product(*to_expand):
+                    aa_dict[aa].append("".join(c))
+
+            # Convert lists of codons to sets
+            all_aa_seen = list(aa_dict.keys())
+            for aa in all_aa_seen:
+                aa_dict[aa] = set(aa_dict[aa])
+
+            # Go through all pairwise combinations of codons seen in for
+            # different amino acids to find any codons (some with "N" at a
+            # single position that overlap at this site)
+            ambiguous = []
+            for j in range(len(all_aa_seen)):
+                set_j = aa_dict[all_aa_seen[j]]
+                for k in range(j+1,len(all_aa_seen)):
+                    set_k = aa_dict[all_aa_seen[k]]
+                    overlap = set_j.intersection(set_k)
+                    ambiguous.extend(overlap)
+
+            final_codon_dict = {}
+            for aa in all_aa_seen:
+                for codon in aa_dict[aa]:
+                    if codon not in ambiguous:
+                        final_codon_dict[codon] = aa
+
+            self._amino_acid_profile.append(copy.deepcopy(final_codon_dict))
+
+        return self._amino_acid_profile
 
     @property
     def total_length(self):

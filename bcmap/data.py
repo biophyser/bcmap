@@ -37,6 +37,16 @@ INDEX_TO_BASE = list("ACGT-")
 BASE_TO_INDEX = dict([(k,i) for i, k in enumerate(INDEX_TO_BASE)])
 BASE_TO_INDEX["N"] = -1
 
+# UNPACK_BASE is a dictionary that keys names to a list of possible bases
+# given that name.  "A" -> ["A"], while "V" -> ["A","C","G"] ... The dictionary
+# is built from BASE_DICT
+UNPACK_BASE = {}
+index_to_base = np.array(INDEX_TO_BASE)[:4]
+for k in BASE_DICT.keys():
+    bases = BASE_DICT[k] > 0.0
+    UNPACK_BASE[k] = index_to_base[bases]
+UNPACK_BASE["-"] = "-"
+
 BASE_FREQS = BASE_DICT["N"]
 LN_BASE_FREQS = np.log(BASE_DICT["N"])
 

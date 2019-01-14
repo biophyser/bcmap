@@ -1,27 +1,11 @@
 
 from . import data
+from . import util
 from .profile import SequenceProfile
 
 import numpy as np
-import os
+import os, sys
 
-def translate(sequence):
-    """
-    Translate a nucleotide sequence into a protein sequence.  If there is a
-    problem, write an "X" into the sequence.
-    """
-
-    try:
-        return "".join([data.GENCODE[sequence[3*i:3*i+3]]
-                        for i in range(len(sequence)//3)])
-    except KeyError:
-        out = []
-        for i in range(len(sequence)//3):
-            try:
-                out.append(data.GENCODE[sequence[3*i:3*i+3]])
-            except KeyError:
-                out.append("X")
-        return "".join(out)
 
 class Experiment:
     """
@@ -65,7 +49,7 @@ class Experiment:
         self._cluster_dict = cluster_dict
         self._inverse_dict = inverse_dict
 
-    def _call_consensus(self,n_probs,c_probs,signal_cutoff=0.3,call_cutoff=0.6):
+    def _call_consensus(self,n_probs,c_probs,signal_cutoff=0.3,call_cutoff=0.80):
         """
         Call the consensus between N-terminal and C-terminal reads.
         """
@@ -130,7 +114,9 @@ class Experiment:
 
         cluster_files = os.listdir(cluster_directory)
         cluster_files.sort()
-        out_root = cluster_directory
+        out_root = os.path.split(cluster_directory)[-1]
+        if out_root == "":
+            out_root = os.path.split(cluster_directory)[0]
 
         # Make output file names
         cluster_out_file = "{}.clusters".format(out_root)
@@ -165,55 +151,86 @@ class Experiment:
                     bases = col[2].strip()
                     quals = np.array([data.Q_DICT[k] for k in list(col[3].strip())])
 
-                    ##### SOME SERIOUS HACKING HERE --> THIS SHOULD GO UP
-                    # IN PROCESS READS FOR PRODUCTION XXXXX
+                    # HACK HACK HACK HACK HACK HACK HACK HACK HACK HACK HACK
+                    # Hacking to deal with issues with N- and C-terminal
+                    # read assignment and truncation.  For production, this
+                    # should go into process_reads.
                     if bases[-9:] == "GCCTAATAA":
                         c_term_reads.append((bases,quals))
                     else:
-                        ## GET RID OF TAATAA FRAGMENT...
-                        tmp_bases = bases[:-5]
-                        tmp_quals = quals[:-5]
-                        n_term_reads.append((tmp_bases,tmp_quals))
-                    ##HACK HACK HACK
+                        if len(bases) > 346:
+                            bases = bases[:346]
+                            quals = quals[:346]
+
+                        # Trim off any extra TAA
+                        while bases[-3:] == "TAA":
+                            bases = bases[:-3]
+                            quals = quals[:-3]
+
+                        n_term_reads.append((bases,quals))
+                    # HACK HACK HACK HACK HACK HACK HACK HACK HACK HACK HACK
 
                     unique_bc[bc] = cluster_number
 
+            num_n = len(n_term_reads)
+            num_c = len(c_term_reads)
+
             # Make sure that both N- and C-terminal sequences are seen
-            if len(n_term_reads) == 0 or len(c_term_reads) == 0:
+            if num_n == 0 or num_c == 0:
                 continue
 
+            # somewhat cryptic call splits:
+            # reads = [(s1,q1),(s2,q2),...(sn,qn)] into
+            # (s1,s2,...,sn), (q1,q2,...,qn)
+            n_bases, n_quals = zip(*n_term_reads)
+            c_bases, c_quals = zip(*c_term_reads)
+
             # Get N- and C-terminal sequences for this cluster
-            n_term_probs = self._ref.calc_base_prob(n_term_reads,align_three_prime=False)
-            c_term_probs = self._ref.calc_base_prob(c_term_reads,align_three_prime=True)
+            n_term_probs = self._ref.calc_base_prob(n_bases,n_quals,align_three_prime=False)
+            c_term_probs = self._ref.calc_base_prob(c_bases,c_quals,align_three_prime=True)
 
             # Get the consensus sequence defined by these
             consensus, support, num_mismatch = self._call_consensus(n_term_probs,
                                                                     c_term_probs)
+            consensus = "".join(consensus)
 
             #Create human-readable support
-            to_write = []
+            support_to_write = []
             for s in support:
                 v = "{:.1f}".format(np.round(s))
                 if v == "1.0": v = "0.9"
+                support_to_write.append(v[-1])
+            support_to_write = "".join(support_to_write)
 
-                to_write.append(v[-1])
-            to_write = "".join(to_write)
+            protein = self._ref.translate(consensus)
+            protein = "".join(protein)
 
-            consensus = "".join(consensus)
-            consensus_out.write(">cluster_{},{}\n{}\n{}\n".format(cluster_number,
-                                                                  num_mismatch,
-                                                                  consensus,
-                                                                  to_write))
+            allele = self._ref.get_allele(consensus)
+            allele = "".join(allele)
 
-            protein = translate(consensus)
-            prot_out.write(">cluster_{},{}\n{}\n".format(cluster_number,
-                                                         num_mismatch,
-                                                         protein))
+
+            # Write outputs
+            consensus_out.write(">cluster_{},{},{},{},{}\n".format(cluster_number,
+                                                                   allele,
+                                                                   num_n,
+                                                                   num_c,
+                                                                   num_mismatch))
+            consensus_out.write("{}\n".format(consensus))
+            consensus_out.write("{}\n".format(support_to_write))
+            consensus_out.write("{}\n".format(util.prob_to_seq(n_term_probs)))
+            consensus_out.write("{}\n".format(util.prob_to_seq(c_term_probs)))
+
+            prot_out.write(">cluster_{},{},{},{},{}\n".format(cluster_number,
+                                                              allele,
+                                                              num_n,
+                                                              num_c,
+                                                              num_mismatch))
+            prot_out.write("{}\n".format(protein))
 
             # Write out cluster numbers
             for bc in unique_bc.keys():
                 # Write cluster/barcode pairs to a file
-                cluster_out.write("{}:{}\n".format(bc,cluster_number))
+                cluster_out.write("{},{},{}\n".format(bc,cluster_number,allele))
 
             # Flush output files
             if i % 1000 == 0:
@@ -221,6 +238,11 @@ class Experiment:
                 consensus_out.flush()
                 prot_out.flush()
                 print(i,"of",len(cluster_files))
+                sys.stdout.flush()
+
+            # HACK HACK HACK
+            if i == 10000:
+                break
 
         # Close output files
         cluster_out.close()
